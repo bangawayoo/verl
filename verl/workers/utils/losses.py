@@ -107,42 +107,59 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     metrics = {}
 
     response_mask = data["response_mask"].to(bool)
-    # compute policy loss
-    old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
     rollout_is_weights = data.get("rollout_is_weights", None)
 
-    loss_agg_mode = config.loss_agg_mode
+    # Check if this is distillation mode (advantages are effectively zero)
+    # In distillation mode, policy gradient loss becomes zero, so we can skip its computation
+    is_distillation = advantages.abs().max() < 1e-8
 
-    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+    if is_distillation:
+        # Distillation mode: policy gradient is zero, only KL loss matters
+        policy_loss = torch.tensor(0.0, device=log_prob.device, dtype=log_prob.dtype)
+        metrics.update(
+            {
+                "pg_loss": 0.0,
+                "pg_clipfrac": 0.0,
+                "ppo_kl": 0.0,
+                "pg_clipfrac_lower": 0.0,
+                "distillation_mode": 1.0,
+            }
+        )
+    else:
+        # Normal PPO: compute policy gradient loss
+        old_log_prob = data["old_log_probs"]
+        loss_agg_mode = config.loss_agg_mode
+        loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
-    policy_loss_fn = get_policy_loss_fn(loss_mode)
-    pg_loss, pg_metrics = policy_loss_fn(
-        old_log_prob=old_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        response_mask=response_mask,
-        loss_agg_mode=loss_agg_mode,
-        config=config,
-        rollout_is_weights=rollout_is_weights,
-    )
+        policy_loss_fn = get_policy_loss_fn(loss_mode)
+        pg_loss, pg_metrics = policy_loss_fn(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            response_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+            config=config,
+            rollout_is_weights=rollout_is_weights,
+        )
 
-    metrics.update(pg_metrics)
-    metrics["actor/pg_loss"] = pg_loss.detach().item()
-    policy_loss = pg_loss
+        metrics.update(pg_metrics)
+        metrics["actor/pg_loss"] = pg_loss.detach().item()
+        policy_loss = pg_loss
 
-    # add entropy loss
+    # add entropy loss (optional, can be used in distillation)
     if entropy is not None:
         entropy_loss = agg_loss(
-            loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+            loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
         )
         entropy_coeff = config.entropy_coeff
         policy_loss -= entropy_coeff * entropy_loss
+        metrics["entropy_loss"] = entropy_loss.detach().item()
 
-    # add kl loss
+    # add kl loss (this is the main distillation signal)
     if config.use_kl_loss:
         ref_log_prob = data["ref_log_prob"]
-        # compute kl loss
+        # compute kl loss using existing kl_penalty() function
         kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
         kl_loss = agg_loss(
             loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info

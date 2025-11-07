@@ -1,0 +1,158 @@
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Configuration for on-policy distillation on GSM8K dataset
+#
+# This configuration demonstrates distillation training where:
+# - Student model generates rollouts (solutions to math problems)
+# - Teacher model provides reference log probabilities
+# - Loss is KL divergence between teacher and student log probabilities
+# - Rewards are set to zero, so only KL divergence signal is used
+
+# Add search path to find base configs  
+# Relative path works when running from verl root directory
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+# Extend the base ppo_trainer config and override distillation-specific settings
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  hybrid_engine: True
+  attn_implementation: flash_attention_2
+  model.use_fused_kernels: True
+
+  # Student model configuration
+  model:
+    path: Qwen/Qwen2.5-0.5B-Instruct  # Student model - replace with your model
+    trust_remote_code: False
+
+  # Actor (student) configuration
+  actor:
+    # Enable KL loss - this is the main distillation signal
+    use_kl_loss: true
+    
+    # KL divergence approximation method
+    # "low_var_kl" (k3) is recommended for better approximation
+    kl_loss_type: low_var_kl
+    
+    # KL loss coefficient - main hyperparameter for distillation
+    # Increase to put more weight on matching teacher distribution
+    # For GSM8K, start with 1.0 and adjust based on results
+    kl_loss_coef: 1.0
+    
+    # Loss aggregation mode
+    loss_agg_mode: token-mean  # Options: "token-mean", "seq-mean-token-sum", "seq-mean-token-mean"
+    
+    # Optional: entropy regularization (can help maintain exploration)
+    entropy_coeff: 0.0  # Set to positive value (e.g., 0.01) if desired
+    
+    # Policy loss config (will be ignored when advantages are zero)
+    policy_loss:
+      loss_mode: "vanilla"
+    
+    # Training hyperparameters
+    ppo_mini_batch_size: 64
+    ppo_micro_batch_size_per_gpu: 4
+    ppo_epochs: 1
+    clip_ratio: 0.2
+    # Optimizer configuration
+    optim:
+      lr: 1e-5  # Learning rate for student model
+      weight_decay: 0.01
+      lr_warmup_steps: 50
+    
+    # FSDP config
+    fsdp_config:
+      param_offload: False
+      optimizer_offload: False
+
+  # Reference model (teacher) configuration
+  ref:
+    # Specify teacher model path
+    # For demonstration, using same model as student initially
+    # In practice, use a larger/better teacher model
+    model:
+      path: Qwen/Qwen2.5-0.5B-Instruct  # Teacher model - replace with your teacher model
+    
+    # Log probability computation settings
+    log_prob_micro_batch_size_per_gpu: 4
+    log_prob_max_token_len_per_gpu: 16384
+
+  # Rollout configuration
+  rollout:
+    name: vllm  # Options: "vllm", "sglang"
+    n: 1  # Number of rollouts per prompt (use n>1 for GRPO)
+    temperature: 0.6
+    top_p: 0.9
+    response_length: 128  # Maximum tokens for generation
+    prompt_length: 7200  # Maximum prompt length for rollout
+    dtype: bfloat16
+    max_num_batched_tokens: 8192  # Increased to handle longer sequences
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.4
+    log_prob_micro_batch_size_per_gpu: 8
+    do_sample: True
+    free_cache_engine: False
+
+# Reward model configuration
+reward_model:
+  enable: False  # Disable reward model
+  
+  # Use distillation reward manager for zero rewards
+  reward_manager: distillation
+
+# Custom reward function (alternative - not needed when using reward_manager: distillation)
+# custom_reward_function:
+#   path: verl.utils.reward_score.distillation
+#   name: compute_score
+
+# Algorithm configuration
+algorithm:
+  adv_estimator: grpo  # Use GRPO for distillation (advantages will be zero)
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: false  # Don't use KL in reward, use in loss instead
+
+# Critic configuration
+critic:
+  enable: false  # Disable critic (no need for value function in distillation)
+  micro_batch_size_per_gpu: 4
+
+
+# Data configuration
+data:
+  train_files: ${oc.env:HOME}/data/v7/ko/train.parquet  # Default path, will be overridden by shell script
+  val_files: ${oc.env:HOME}/data/v7/ko/validation.parquet  # Default path, will be overridden by shell script
+  train_batch_size: 256  # Increased to be >= ppo_mini_batch_size
+  max_prompt_length: 7200  
+  max_response_length: 2048  # Increased for longer responses
+  filter_overlong_prompts: False
+  truncation: error
+
+# Trainer configuration
+trainer:
+  n_gpus_per_node: 8  # Adjust based on your setup
+  nnodes: 1
+  logger: ["console", "tensorboard"]
+  project_name: verl_distillation
+  experiment_name: qwen2.5_0.5b_distillation
+  val_before_train: true
+  save_freq: 100
+  test_freq: 100
+  total_epochs: 1
+
