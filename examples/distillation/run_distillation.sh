@@ -4,19 +4,24 @@ set -e
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7  # Adjust to your GPU setup
 export PYTHONUNBUFFERED=1
 
-TRAIN_PATH=${HOME}/data/v7/ko/train.parquet
-TEST_PATH=${HOME}/data/v7/ko/validation.parquet
-# TRAIN_PATH=${HOME}/data/jsonl_processed/train.parquet
-# TEST_PATH=${HOME}/data/jsonl_processed/validation.parquet
+# Dataset paths - GSM8K (open source math dataset)
+# Run this first to prepare the data:
+#   python3 examples/data_preprocess/gsm8k.py --local_save_dir ~/data/gsm8k
+TRAIN_PATH=${HOME}/data/gsm8k/train.parquet
+TEST_PATH=${HOME}/data/gsm8k/test.parquet
 
-# Model paths - UPDATE THESE TO YOUR MODELS
-STUDENT_MODEL="/home/ubuntu/kiyoon/checkpoints/gguf/portable/v7/ko-1103/kanana-1.5-2.1b-instruct-2505/checkpoint-90000"  
-TEACHER_MODEL="/home/ubuntu/kiyoon/checkpoints/gguf/portable/v7/ko-1103/kanana-1.5-8b-instruct-2505/checkpoint-150000"
+# Model paths - Open source Qwen models from Hugging Face
+# Option 1: True distillation (large teacher -> small student)
+STUDENT_MODEL="Qwen/Qwen2.5-0.5B-Instruct"
+TEACHER_MODEL="Qwen/Qwen2.5-7B-Instruct"
 
+# Option 2: Self-distillation (same model, uncomment to use)
+# STUDENT_MODEL="Qwen/Qwen2.5-3B-Instruct"
+# TEACHER_MODEL="Qwen/Qwen2.5-3B-Instruct"
 
+# Training hyperparameters
 LR=1e-6
-EXPERIMENT_NAME="kanana-ko-v7-lr1e-6-n=2"
-
+EXPERIMENT_NAME="gsm8k-distillation-qwen-0.5b-from-7b"
 
 echo "=========================================="
 echo "On-Policy Distillation Training"
@@ -52,4 +57,3 @@ echo "=========================================="
 echo "Training complete! Check log for details:"
 echo "$VERL_ROOT/verl_distillation.log"
 echo "=========================================="
-

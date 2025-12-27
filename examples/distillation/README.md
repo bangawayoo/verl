@@ -46,8 +46,10 @@ verl provides dedicated distillation trainer configurations:
 - `verl/trainer/config/distillation_trainer.yaml`: For FSDP backend
 - `verl/trainer/config/distillation_megatron_trainer.yaml`: For Megatron backend
 
-Example script:
-- `run_distillation.sh`: Example script using the distillation trainer config
+Example scripts:
+- `run_distillation.sh`: Training script using the distillation trainer config
+- `run_evaluation.sh`: Evaluation script for trained models
+- `evaluate_model.py`: Python script for flexible model evaluation
 
 ## Usage
 
@@ -156,6 +158,27 @@ custom_reward_function:
 reward_model:
   enable: False
 ```
+
+## Evaluation
+
+After training, evaluate your model's performance:
+
+### Quick Evaluation (Shell Script)
+```bash
+# Edit run_evaluation.sh to set your checkpoint path, then run:
+bash run_evaluation.sh
+```
+
+### Flexible Evaluation (Python Script)
+```bash
+# Evaluate a checkpoint
+python3 evaluate_model.py --model_path /path/to/checkpoint/actor
+
+# See all options
+python3 evaluate_model.py --help
+```
+
+**For detailed evaluation guide**, see [EVALUATION_README.md](./EVALUATION_README.md)
 
 ## Troubleshooting
 

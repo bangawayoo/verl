@@ -16,7 +16,7 @@ model:
 rollout:
   _target_: verl.workers.config.RolloutConfig
   name: vllm
-  mode: sync # sync: LLM, async: AsyncLLM
+  mode: async # async: server mode (only async is supported for vllm/sglang)
   temperature: 1.0
   top_k: 50 # 0 for hf rollout, -1 for vllm rollout
   top_p: 0.7
@@ -31,16 +31,26 @@ rollout:
   load_format: auto
   tensor_model_parallel_size: 1
   data_parallel_size: 1
+  expert_parallel_size: 1
+  pipeline_model_parallel_size: 1
   max_num_batched_tokens: 8192
   max_model_len: null
   max_num_seqs: 1024
+  enable_chunked_prefill: True
+  enable_prefix_caching: True
   log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
   log_prob_micro_batch_size_per_gpu: 8
+  log_prob_use_dynamic_bsz: False
+  log_prob_max_token_len_per_gpu: 16384
   # for hf rollout
   do_sample: True
   disable_log_stats: True
-  enable_chunked_prefill: True
   n: 1
+  over_sample_rate: 0
+  multi_stage_wake_up: False
+  engine_kwargs:
+    vllm: {}
+    sglang: {}
   # support logging rollout prob for debugging purpose
   calculate_log_probs: False
 actor:
