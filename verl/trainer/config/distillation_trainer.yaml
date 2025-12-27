@@ -1,0 +1,192 @@
+# On-policy distillation configuration for FSDP backend
+#
+# This configuration sets up KL-divergence based distillation where:
+# - Student model generates rollouts (sequences)
+# - Teacher model provides reference log probabilities
+# - Loss is KL divergence between teacher and student distributions
+# - Rewards are set to zero, so only KL divergence signal is used
+
+# Inherit all defaults from ppo_trainer and override for distillation
+defaults:
+
+  # Inherit all defaults from ppo_trainer
+  - ppo_trainer
+
+  # Override with distillation-specific settings
+  - _self_
+
+# Actor, rollout and reference model configuration
+actor_rollout_ref:
+
+  # Enable hybrid engine for performance
+  hybrid_engine: true
+
+  # Flash attention implementation for efficiency
+  attn_implementation: flash_attention_2
+
+  # Student model configuration
+  model:
+
+    # Path to student model - must be specified by user
+    path: null
+
+    # Whether to trust remote code from model repository
+    trust_remote_code: false
+
+    # Enable fused kernels for memory efficiency
+    use_fused_kernels: true
+
+  # Actor (student) configuration for distillation
+  actor:
+
+    # Use distillation loss function
+    loss_mode: distillation
+
+    # Enable KL loss - this is the main distillation signal
+    use_kl_loss: true
+
+    # KL divergence approximation method
+    # "low_var_kl" (k3) is recommended for better approximation
+    kl_loss_type: low_var_kl
+
+    # KL loss coefficient - main hyperparameter for distillation
+    # Increase to put more weight on matching teacher distribution
+    kl_loss_coef: 1.0
+
+    # Optional: entropy regularization (can help maintain exploration)
+    # Set to positive value (e.g., 0.01) if desired
+    entropy_coeff: 0.0
+
+    # Loss aggregation mode
+    # Options: "token-mean", "seq-mean-token-sum", "seq-mean-token-mean"
+    loss_agg_mode: token-mean
+
+    # Policy loss config (will be ignored when advantages are zero)
+    policy_loss:
+      loss_mode: vanilla
+
+    # Training hyperparameters
+    ppo_micro_batch_size_per_gpu: 4
+    ppo_epochs: 1
+    clip_ratio: 0.2
+
+    # Optimizer configuration
+    optim:
+      lr: 1e-6  # Learning rate for student model
+      weight_decay: 0.01
+      lr_warmup_steps: 50
+
+    # FSDP config
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+
+  # Reference model (teacher) configuration
+  ref:
+
+    # Teacher model configuration
+    model:
+
+      # Path to pretrained teacher model - must be specified by user
+      path: null
+
+    # Log probability computation settings
+    log_prob_micro_batch_size_per_gpu: 4
+    log_prob_max_token_len_per_gpu: 16384
+
+  # Rollout configuration
+  rollout:
+
+    # Rollout engine name
+    name: vllm  # Options: "vllm", "sglang"
+
+    # Number of rollouts per prompt (use n>1 for GRPO)
+    n: 4
+
+    # Sampling parameters
+    temperature: 0.9
+    top_p: 0.7
+    do_sample: true
+
+    # Response generation settings
+    response_length: 128  # Maximum tokens for generation
+    prompt_length: 7200  # Maximum prompt length for rollout
+
+    # Data type for computation
+    dtype: bfloat16
+
+    # VLLM specific settings
+    max_num_batched_tokens: 8192  # Increased to handle longer sequences
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.4
+    log_prob_micro_batch_size_per_gpu: 8
+    free_cache_engine: false
+
+# Reward model configuration
+reward_model:
+
+  # Disable reward model for distillation
+  enable: false
+
+  # Use distillation reward manager for zero rewards
+  reward_manager: distillation
+
+# Critic configuration
+critic:
+
+  # Disable critic - not needed for distillation
+  enable: false
+
+  # Micro batch size (included for compatibility)
+  micro_batch_size_per_gpu: 4
+
+# Algorithm configuration
+algorithm:
+
+  # Use GRPO estimator (advantages will be zero)
+  adv_estimator: grpo
+
+  # Don't use KL in reward, use in loss instead
+  use_kl_in_reward: false
+
+# Data configuration
+data:
+
+  # Training data path - will be overridden by command line
+  train_files: null
+
+  # Validation data path - will be overridden by command line
+  val_files: null
+
+  # Batch size for training
+  train_batch_size: 256
+
+  # Maximum sequence lengths
+  max_prompt_length: 7200
+  max_response_length: 2048
+
+  # How to handle overlong prompts
+  filter_overlong_prompts: false
+  truncation: error
+
+# Trainer configuration
+trainer:
+
+  # Project name for logging
+  project_name: verl_distillation
+
+  # Experiment name
+  experiment_name: distillation
+
+  # GPU configuration
+  n_gpus_per_node: 8  # Adjust based on your setup
+  nnodes: 1
+
+  # Logging configuration
+  logger: ["console", "tensorboard"]
+
+  # Training schedule
+  val_before_train: true
+  save_freq: 500
+  test_freq: 500
+  total_epochs: 1

@@ -88,6 +88,7 @@ class ActorConfig(BaseConfig):
 
     Args:
         strategy (str): Training strategy. Must be specified.
+        loss_mode (str): Loss function mode. Options: 'ppo', 'distillation', 'sft'. Default: 'ppo'.
         ppo_mini_batch_size (int): Mini-batch size for PPO training.
         ppo_micro_batch_size (Optional[int]): Micro-batch size for PPO training.
             If None, uses ppo_micro_batch_size_per_gpu.
@@ -128,6 +129,7 @@ class ActorConfig(BaseConfig):
     }
 
     strategy: str = MISSING
+    loss_mode: str = "ppo"
     ppo_mini_batch_size: int = 256
     ppo_micro_batch_size: Optional[int] = None  # deprecate
     ppo_micro_batch_size_per_gpu: Optional[int] = None

@@ -22,9 +22,12 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
+from verl.workers.utils.loss_registry import register_loss
 
 
+@register_loss("sft")
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+    """Compute supervised fine-tuning loss."""
     pad_mode = tu.get_non_tensor_data(data=data, key="pad_mode", default=DatasetPadMode.NO_PADDING)
     dp_size = data["dp_size"]
     batch_num_tokens = data["batch_num_tokens"]
@@ -92,7 +95,56 @@ def _slice_response_from_unpad_output(tensor: torch.Tensor, data: TensorDict) ->
     return output
 
 
+@register_loss("distillation")
+def distillation_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+    """Compute distillation loss using KL divergence between student and teacher."""
+    log_prob = _slice_response_from_unpad_output(model_output["log_probs"], data)
+    entropy = model_output.get("entropy", None)
+    if entropy is not None:
+        entropy = _slice_response_from_unpad_output(entropy, data)
+
+    # global batch info for loss aggregation
+    config.global_batch_info["dp_size"] = data["dp_size"]
+    config.global_batch_info["batch_num_tokens"] = data["batch_num_tokens"]
+    config.global_batch_info["global_batch_size"] = data["global_batch_size"]
+    config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+
+    response_mask = data["response_mask"].to(bool)
+    ref_log_prob = data["ref_log_prob"]
+
+    # Compute KL divergence
+    kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
+    kl_loss = agg_loss(
+        loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
+    )
+
+    total_loss = kl_loss * config.kl_loss_coef
+
+    metrics = {
+        "kl_loss": kl_loss.detach().item(),
+        "kl_coef": config.kl_loss_coef,
+        "distillation_mode": 1.0,
+        # Add zero values for policy gradient metrics for consistency
+        "pg_loss": 0.0,
+        "pg_clipfrac": 0.0,
+        "ppo_kl": 0.0,
+        "pg_clipfrac_lower": 0.0,
+    }
+
+    # Add optional entropy regularization
+    if entropy is not None and config.entropy_coeff > 0:
+        entropy_loss = agg_loss(
+            loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
+        )
+        total_loss -= config.entropy_coeff * entropy_loss
+        metrics["entropy_loss"] = entropy_loss.detach().item()
+
+    return total_loss, metrics
+
+
+@register_loss("ppo")
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+    """Compute standard PPO loss."""
     log_prob = _slice_response_from_unpad_output(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
@@ -105,49 +157,29 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
 
     metrics = {}
-
     response_mask = data["response_mask"].to(bool)
     advantages = data["advantages"]
     rollout_is_weights = data.get("rollout_is_weights", None)
+    old_log_prob = data["old_log_probs"]
+    loss_agg_mode = config.loss_agg_mode
+    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
-    # Check if this is distillation mode (advantages are effectively zero)
-    # In distillation mode, policy gradient loss becomes zero, so we can skip its computation
-    is_distillation = advantages.abs().max() < 1e-8
+    policy_loss_fn = get_policy_loss_fn(loss_mode)
+    pg_loss, pg_metrics = policy_loss_fn(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_is_weights,
+    )
 
-    if is_distillation:
-        # Distillation mode: policy gradient is zero, only KL loss matters
-        policy_loss = torch.tensor(0.0, device=log_prob.device, dtype=log_prob.dtype)
-        metrics.update(
-            {
-                "pg_loss": 0.0,
-                "pg_clipfrac": 0.0,
-                "ppo_kl": 0.0,
-                "pg_clipfrac_lower": 0.0,
-                "distillation_mode": 1.0,
-            }
-        )
-    else:
-        # Normal PPO: compute policy gradient loss
-        old_log_prob = data["old_log_probs"]
-        loss_agg_mode = config.loss_agg_mode
-        loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+    metrics.update(pg_metrics)
+    metrics["actor/pg_loss"] = pg_loss.detach().item()
+    policy_loss = pg_loss
 
-        policy_loss_fn = get_policy_loss_fn(loss_mode)
-        pg_loss, pg_metrics = policy_loss_fn(
-            old_log_prob=old_log_prob,
-            log_prob=log_prob,
-            advantages=advantages,
-            response_mask=response_mask,
-            loss_agg_mode=loss_agg_mode,
-            config=config,
-            rollout_is_weights=rollout_is_weights,
-        )
-
-        metrics.update(pg_metrics)
-        metrics["actor/pg_loss"] = pg_loss.detach().item()
-        policy_loss = pg_loss
-
-    # add entropy loss (optional, can be used in distillation)
+    # add entropy loss
     if entropy is not None:
         entropy_loss = agg_loss(
             loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
@@ -156,7 +188,7 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         policy_loss -= entropy_coeff * entropy_loss
         metrics["entropy_loss"] = entropy_loss.detach().item()
 
-    # add kl loss (this is the main distillation signal)
+    # add kl loss (for PPO with KL regularization)
     if config.use_kl_loss:
         ref_log_prob = data["ref_log_prob"]
         # compute kl loss using existing kl_penalty() function
@@ -173,13 +205,13 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
 
 def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=None):
-    """value loss
+    """Compute value function loss for critic.
 
     Args:
         config: CriticConfig
         model_output: model output from the model
         data: the input to the model
-        dp_group: data paralle group
+        dp_group: data parallel group
 
     Returns:
         value loss

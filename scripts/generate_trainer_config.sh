@@ -6,6 +6,8 @@ set -euox pipefail
 CONFIG_SPECS=(
     "ppo_trainer:_generated_ppo_trainer.yaml:"
     "ppo_megatron_trainer:_generated_ppo_megatron_trainer.yaml:--config-name=ppo_megatron_trainer.yaml"
+    "distillation_trainer:_generated_distillation_trainer.yaml:--config-name=distillation_trainer.yaml"
+    "distillation_megatron_trainer:_generated_distillation_megatron_trainer.yaml:--config-name=distillation_megatron_trainer.yaml"
 )
 
 generate_config() {
